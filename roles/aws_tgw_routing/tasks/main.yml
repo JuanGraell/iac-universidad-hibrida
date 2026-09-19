@@ -1,0 +1,39 @@
+---
+# Tablas de rutas del Transit Gateway. No hay módulo de Ansible para ellas,
+# así que se generan como plantilla CloudFormation (YAML) desde routing.yml.
+
+# Los attachments de la VPN y del Direct Connect los crea AWS; se consultan para
+# referenciarlos por nombre (vpn, dxgw) igual que las VPC.
+- name: Look up the VPN and Direct Connect attachments
+  ansible.builtin.command:
+    argv: [aws, ec2, describe-transit-gateway-attachments, --region, "{{ region }}",
+           --filters, "Name=transit-gateway-id,Values={{ tgw_id }}",
+           "Name=resource-type,Values=vpn,direct-connect-gateway",
+           "Name=state,Values=available",
+           --query, "TransitGatewayAttachments[].{id: TransitGatewayAttachmentId, type: ResourceType}",
+           --output, json]
+  register: _hybrid_attachments
+  changed_when: false
+
+- name: Build the attachment map (VPC, vpn and dxgw)
+  ansible.builtin.set_fact:
+    tgw_attachments: >-
+      {{ attachment_ids | combine(dict(
+           _hybrid_attachments.stdout | from_json
+           | map(attribute='type') | map('replace', 'direct-connect-gateway', 'dxgw')
+           | zip(_hybrid_attachments.stdout | from_json | map(attribute='id')))) }}
+
+- name: Check that every attachment in routing.yml exists
+  ansible.builtin.assert:
+    that: item in tgw_attachments
+    fail_msg: "Attachment {{ item }} not found: deploy aws_network and aws_hybrid first"
+    quiet: true
+  loop: "{{ tgw_route_tables.values() | map(attribute='associations') | flatten | unique }}"
+
+- name: Deploy the seven Transit Gateway route tables
+  amazon.aws.cloudformation:
+    stack_name: "{{ project }}-tgw-routing"
+    state: present
+    region: "{{ region }}"
+    template_body: "{{ lookup('ansible.builtin.template', 'tgw-routing.yml.j2') }}"
+    tags: "{{ common_tags | combine(environment_tags.hub) }}"

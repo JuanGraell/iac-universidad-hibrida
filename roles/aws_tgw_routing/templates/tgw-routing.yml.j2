@@ -1,0 +1,55 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Las siete tablas de rutas del Transit Gateway (Tabla 3, sección 3), generadas desde
+  group_vars/all/routing.yml. Aquí vive la separación entre entornos.
+
+Resources:
+{% for rt, cfg in tgw_route_tables.items() %}
+{% set rid = rt | replace('-', ' ') | title | replace(' ', '') %}
+  {{ rid }}:
+    Type: AWS::EC2::TransitGatewayRouteTable
+    Properties:
+      TransitGatewayId: {{ tgw_id }}
+      Tags:
+        - {Key: Name, Value: {{ rt }}}
+
+{% for a in cfg.associations %}
+  {{ rid }}Assoc{{ a | title }}:
+    Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    Properties:
+      TransitGatewayRouteTableId:
+        Ref: {{ rid }}
+      TransitGatewayAttachmentId: {{ tgw_attachments[a] }}
+
+{% endfor %}
+{% for p in cfg.propagations %}
+  {{ rid }}Prop{{ p | title }}:
+    Type: AWS::EC2::TransitGatewayRouteTablePropagation
+    Properties:
+      TransitGatewayRouteTableId:
+        Ref: {{ rid }}
+      TransitGatewayAttachmentId: {{ tgw_attachments[p] }}
+
+{% endfor %}
+{% for cidr, target in cfg.static.items() %}
+  {{ rid }}Route{{ loop.index }}:
+    Type: AWS::EC2::TransitGatewayRoute
+    Properties:
+      TransitGatewayRouteTableId:
+        Ref: {{ rid }}
+      DestinationCidrBlock: {{ cidr }}
+      TransitGatewayAttachmentId: {{ tgw_attachments[target] }}
+
+{% endfor %}
+{# Segunda barrera entre Producción y Desarrollo: se descarta en el TGW aunque el firewall falle. #}
+{% for cidr in cfg.blackholes %}
+  {{ rid }}Blackhole{{ loop.index }}:
+    Type: AWS::EC2::TransitGatewayRoute
+    Properties:
+      TransitGatewayRouteTableId:
+        Ref: {{ rid }}
+      DestinationCidrBlock: {{ cidr }}
+      Blackhole: true
+
+{% endfor %}
+{% endfor %}

@@ -1,0 +1,153 @@
+---
+# Red del campus: interfaces, VLAN con su puerta de enlace y OSPF área 0.
+# Lee los mismos datos que los roles de AWS (addressing.yml).
+
+- name: Load this device's data
+  ansible.builtin.set_fact:
+    _dev: "{{ campus_devices[inventory_hostname] }}"
+    _svis: "{{ campus_vlans | selectattr('gateway', 'equalto', inventory_hostname) | list }}"
+    _vlan_list: >-
+      {%- set out = [] -%}
+      {%- for v in campus_vlans if v.gateway == inventory_hostname -%}
+      {%- set _ = out.append({'vlan_id': v.id, 'name': v.name}) -%}
+      {%- endfor -%}
+      {{ out }}
+    # Los enlaces 10.0.1.x/31 forman adyacencias OSPF; el resto de interfaces queda pasiva.
+    _ospf_links: >-
+      {%- set out = [] -%}
+      {%- for l in campus_devices[inventory_hostname].links -%}
+      {%- if (l.address | ansible.utils.ipaddr('address')) is ansible.utils.in_network('10.0.1.0/24') -%}
+      {%- set _ = out.append(l.interface) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Configure IOS devices
+  when: ansible_network_os == 'cisco.ios.ios'
+  block:
+    - name: IOS | Describe and enable the interfaces
+      cisco.ios.ios_interfaces:
+        config: >-
+          {%- set out = [{'name': 'Loopback0', 'description': 'Router ID', 'enabled': true}] -%}
+          {%- for l in _dev.links -%}
+          {%- set _ = out.append({'name': l.interface, 'description': l.description, 'enabled': true}) -%}
+          {%- endfor -%}
+          {{ out }}
+        state: merged
+
+    - name: IOS | Set the 802.1Q tag on the Direct Connect subinterface
+      cisco.ios.ios_config:
+        parents: "interface {{ item.interface }}"
+        lines: ["encapsulation dot1Q {{ item.dot1q }}"]
+      loop: "{{ _dev.links | selectattr('dot1q', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.interface }}"
+
+    - name: IOS | Address the loopback and the point-to-point links
+      cisco.ios.ios_l3_interfaces:
+        config: >-
+          {%- set out = [{'name': 'Loopback0', 'ipv4': [{'address': _dev.loopback}]}] -%}
+          {%- for l in _dev.links -%}
+          {%- set _ = out.append({'name': l.interface, 'ipv4': [{'address': l.address}]}) -%}
+          {%- endfor -%}
+          {{ out }}
+        state: merged
+
+    - name: IOS | Create the VLANs that this device routes
+      cisco.ios.ios_vlans:
+        config: "{{ _vlan_list }}"
+        state: merged
+      when: _svis | length > 0
+
+    - name: IOS | Create the gateway (SVI) of each VLAN
+      cisco.ios.ios_l3_interfaces:
+        config: >-
+          {%- set out = [] -%}
+          {%- for v in _svis -%}
+          {%- set _ = out.append({'name': 'Vlan' ~ v.id,
+                                  'ipv4': [{'address': v.cidr | ansible.utils.ipaddr('1')}]}) -%}
+          {%- endfor -%}
+          {{ out }}
+        state: merged
+      when: _svis | length > 0
+
+    - name: IOS | Configure OSPF area 0 (passive by default)
+      cisco.ios.ios_ospfv2:
+        config:
+          processes:
+            - process_id: 1
+              router_id: "{{ _dev.loopback | ansible.utils.ipaddr('address') }}"
+              network:
+                - address: "{{ campus_aggregate | ansible.utils.ipaddr('network') }}"
+                  wildcard_bits: "{{ campus_aggregate | ansible.utils.ipaddr('hostmask') }}"
+                  area: 0
+              passive_interfaces:
+                default: true
+                interface:
+                  set_interface: false
+                  name: "{{ _ospf_links }}"
+        state: merged
+
+- name: Configure NX-OS devices
+  when: ansible_network_os == 'cisco.nxos.nxos'
+  block:
+    - name: NX-OS | Enable the required features
+      cisco.nxos.nxos_feature:
+        feature: "{{ item }}"
+        state: enabled
+      loop: [ospf, interface-vlan]
+
+    - name: NX-OS | Create the data center VLANs
+      cisco.nxos.nxos_vlans:
+        config: "{{ _vlan_list }}"
+        state: merged
+
+    - name: NX-OS | Enable the loopback, uplink and SVIs
+      cisco.nxos.nxos_interfaces:
+        config: >-
+          {%- set out = [{'name': 'loopback0', 'enabled': true}] -%}
+          {%- for l in _dev.links -%}
+          {%- set _ = out.append({'name': l.interface, 'description': l.description,
+                                  'mode': 'layer3', 'enabled': true}) -%}
+          {%- endfor -%}
+          {%- for v in _svis -%}
+          {%- set _ = out.append({'name': 'Vlan' ~ v.id, 'description': v.name, 'enabled': true}) -%}
+          {%- endfor -%}
+          {{ out }}
+        state: merged
+
+    - name: NX-OS | Address the loopback, uplink and SVIs
+      cisco.nxos.nxos_l3_interfaces:
+        config: >-
+          {%- set out = [{'name': 'loopback0', 'ipv4': [{'address': _dev.loopback}]}] -%}
+          {%- for l in _dev.links -%}
+          {%- set _ = out.append({'name': l.interface, 'ipv4': [{'address': l.address}]}) -%}
+          {%- endfor -%}
+          {%- for v in _svis -%}
+          {%- set _ = out.append({'name': 'Vlan' ~ v.id,
+                                  'ipv4': [{'address': v.cidr | ansible.utils.ipaddr('1')}]}) -%}
+          {%- endfor -%}
+          {{ out }}
+        state: merged
+
+    - name: NX-OS | Configure the OSPF process
+      cisco.nxos.nxos_ospfv2:
+        config:
+          processes:
+            - process_id: "1"
+              router_id: "{{ _dev.loopback | ansible.utils.ipaddr('address') }}"
+        state: merged
+
+    - name: NX-OS | Put the interfaces in area 0 (SVIs passive)
+      cisco.nxos.nxos_ospf_interfaces:
+        config: >-
+          {%- set out = [] -%}
+          {%- for name in ['loopback0'] + (_dev.links | map(attribute='interface') | list)
+                          + (_svis | map(attribute='id') | map('regex_replace', '^', 'Vlan') | list) -%}
+          {%- set _ = out.append({'name': name, 'address_family': [{
+                'afi': 'ipv4',
+                'processes': [{'process_id': '1', 'area': {'area_id': '0.0.0.0'}}],
+                'passive_interface': name.startswith('Vlan')}]}) -%}
+          {%- endfor -%}
+          {{ out }}
+        state: merged

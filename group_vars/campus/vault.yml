@@ -1,0 +1,6 @@
+---
+# Credenciales de los equipos del campus. Antes del primer commit se cifra este archivo:
+#   ansible-vault encrypt group_vars/campus/vault.yml
+vault_network_user: ansible
+vault_network_password: CHANGE_ME
+vault_bgp_md5_key: CHANGE_ME

@@ -1,0 +1,32 @@
+---
+# Despliegue completo. El orden importa: cada rol usa los IDs que dejó el anterior.
+#   ansible-playbook site.yml --check --diff     (revisión, sin cambios)
+#   ansible-playbook site.yml                    (aplicar)
+#   ansible-playbook site.yml --tags campus      (solo el campus)
+
+- name: Cloud network (AWS)
+  hosts: aws
+  gather_facts: false
+  tags: [aws]
+  roles:
+    - role: aws_network        # Transit Gateway, VPC, subredes, IGW, NAT y attachments
+    - role: aws_hybrid         # Direct Connect gateway y VPN de respaldo
+    - role: aws_inspection     # Network Firewall con las reglas de la matriz de flujos
+    - role: aws_vpc_routes     # tablas de rutas de las subredes y endpoints de S3
+    - role: aws_tgw_routing    # las siete tablas del Transit Gateway
+    - role: aws_security       # security groups y VPC Flow Logs
+    - role: aws_dns            # DNS híbrido
+
+- name: Campus network (Cisco)
+  hosts: campus
+  gather_facts: false
+  tags: [campus]
+  roles:
+    - role: campus_network     # interfaces, VLAN, SVI y OSPF
+
+- name: Campus BGP towards AWS
+  hosts: edge
+  gather_facts: false
+  tags: [campus]
+  roles:
+    - role: campus_bgp         # eBGP, prefix-lists y LOCAL_PREF

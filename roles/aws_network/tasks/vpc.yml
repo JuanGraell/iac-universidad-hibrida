@@ -1,0 +1,109 @@
+---
+# Una VPC completa a partir de su entrada en addressing.yml.
+
+- name: "Set the tags for this environment | {{ vpc.key }}"
+  ansible.builtin.set_fact:
+    _tags: "{{ common_tags | combine(environment_tags[vpc.key]) }}"
+
+- name: "Create the VPC | {{ vpc.key }}"
+  amazon.aws.ec2_vpc_net:
+    name: "{{ project }}-{{ vpc.key }}"
+    cidr_block: "{{ vpc.value.cidr }}"
+    ipv6_cidr: true
+    dns_support: true
+    dns_hostnames: true
+    region: "{{ region }}"
+    tags: "{{ _tags }}"
+  register: _vpc
+
+- name: "Save the VPC ID | {{ vpc.key }}"
+  ansible.builtin.set_fact:
+    vpc_ids: "{{ vpc_ids | default({}) | combine({vpc.key: _vpc.vpc.id}) }}"
+
+# Aplana los tiers en una lista de subredes: una por tier y por zona de disponibilidad.
+- name: "Build the subnet list | {{ vpc.key }}"
+  ansible.builtin.set_fact:
+    _subnets: >-
+      {%- set out = [] -%}
+      {%- for tier, t in vpc.value.tiers.items() -%}
+      {%- for cidr in t.cidrs -%}
+      {%- set _ = out.append({'tier': tier, 'az': azs[loop.index0], 'cidr': cidr,
+                              'public': t.public | default(false)}) -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: "Create the subnets | {{ vpc.key }}"
+  amazon.aws.ec2_vpc_subnet:
+    vpc_id: "{{ _vpc.vpc.id }}"
+    cidr: "{{ item.cidr }}"
+    az: "{{ item.az }}"
+    map_public: false
+    region: "{{ region }}"
+    tags: "{{ _tags | combine({'Name': project ~ '-' ~ vpc.key ~ '-' ~ item.tier ~ '-' ~ item.az[-1], 'Tier': item.tier}) }}"
+  loop: "{{ _subnets }}"
+  loop_control:
+    label: "{{ item.tier }} {{ item.az }} {{ item.cidr }}"
+  register: _subnet_result
+
+- name: "Save the subnet IDs by tier and zone | {{ vpc.key }}"
+  ansible.builtin.set_fact:
+    subnet_ids: "{{ subnet_ids | default({}) | combine({vpc.key: {item.item.tier: {item.item.az: item.subnet.id}}}, recursive=true) }}"
+  loop: "{{ _subnet_result.results }}"
+  loop_control:
+    label: "{{ item.item.tier }} {{ item.item.az }}"
+
+- name: "Create the Internet Gateway | {{ vpc.key }}"
+  amazon.aws.ec2_vpc_igw:
+    vpc_id: "{{ _vpc.vpc.id }}"
+    region: "{{ region }}"
+    tags: "{{ _tags | combine({'Name': project ~ '-' ~ vpc.key ~ '-igw'}) }}"
+  when: vpc.value.internet_gateway | default(false)
+
+- name: "Create the egress-only Internet Gateway (IPv6) | {{ vpc.key }}"
+  amazon.aws.ec2_vpc_egress_igw:
+    vpc_id: "{{ _vpc.vpc.id }}"
+    region: "{{ region }}"
+    tags: "{{ _tags | combine({'Name': project ~ '-' ~ vpc.key ~ '-eigw'}) }}"
+  register: _eigw
+  when: vpc.value.egress_only_igw | default(false)
+
+- name: "Save the egress-only gateway ID | {{ vpc.key }}"
+  ansible.builtin.set_fact:
+    eigw_ids: "{{ eigw_ids | default({}) | combine({vpc.key: _eigw.gateway_id}) }}"
+  when: vpc.value.egress_only_igw | default(false)
+
+# Un NAT Gateway por zona: si una zona falla, la otra sigue saliendo a Internet.
+- name: "Create one NAT Gateway per zone | {{ vpc.key }}"
+  amazon.aws.ec2_vpc_nat_gateway:
+    subnet_id: "{{ subnet_ids[vpc.key][vpc.value.nat_tier][item] }}"
+    if_exist_do_not_create: true
+    wait: true
+    region: "{{ region }}"
+    tags: "{{ _tags | combine({'Name': project ~ '-nat-' ~ item[-1]}) }}"
+  loop: "{{ azs }}"
+  register: _nat
+  when: vpc.value.nat_tier is defined
+
+- name: "Save the NAT Gateway IDs by zone | {{ vpc.key }}"
+  ansible.builtin.set_fact:
+    nat_ids: "{{ nat_ids | default({}) | combine({item.item: item.nat_gateway_id}) }}"
+  loop: "{{ _nat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: vpc.value.nat_tier is defined
+
+- name: "Attach the VPC to the Transit Gateway | {{ vpc.key }}"
+  amazon.aws.ec2_transit_gateway_vpc_attachment:
+    name: "{{ project }}-attach-{{ vpc.key }}"
+    transit_gateway: "{{ tgw_id }}"
+    subnets: "{{ subnet_ids[vpc.key].tgw.values() | list }}"
+    appliance_mode_support: "{{ vpc.value.appliance_mode | default(false) }}"
+    dns_support: true
+    region: "{{ region }}"
+    tags: "{{ _tags }}"
+  register: _attachment
+
+- name: "Save the attachment ID | {{ vpc.key }}"
+  ansible.builtin.set_fact:
+    attachment_ids: "{{ attachment_ids | default({}) | combine({vpc.key: _attachment.attachments[0].transit_gateway_attachment_id}) }}"

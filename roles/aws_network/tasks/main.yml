@@ -1,0 +1,27 @@
+---
+# Transit Gateway y las seis VPC del diagrama lógico.
+# Las asociaciones y propagaciones automáticas se desactivan: las define el rol aws_tgw_routing.
+
+- name: Create the Transit Gateway
+  amazon.aws.ec2_transit_gateway:
+    description: "{{ project }} transit gateway"
+    asn: "{{ tgw_asn }}"
+    auto_associate: false
+    auto_propagate: false
+    auto_attach: false
+    dns_support: true
+    vpn_ecmp_support: true
+    region: "{{ region }}"
+    tags: "{{ common_tags | combine(environment_tags.hub, {'Name': project ~ '-tgw'}) }}"
+  register: _tgw
+
+- name: Save the Transit Gateway ID
+  ansible.builtin.set_fact:
+    tgw_id: "{{ _tgw.transit_gateway.transit_gateway_id }}"
+
+- name: Build each VPC
+  ansible.builtin.include_tasks: vpc.yml
+  loop: "{{ vpcs | dict2items }}"
+  loop_control:
+    loop_var: vpc
+    label: "{{ vpc.key }} {{ vpc.value.cidr }}"

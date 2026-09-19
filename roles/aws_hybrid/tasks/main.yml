@@ -1,0 +1,69 @@
+---
+# Conectividad con el campus: Direct Connect como enlace principal y VPN IPsec como respaldo,
+# ambos contra el mismo Transit Gateway.
+
+- name: Register the campus router as a customer gateway
+  community.aws.ec2_customer_gateway:
+    name: "{{ project }}-cgw-campus"
+    bgp_asn: "{{ campus_asn }}"
+    ip_address: "{{ campus_public_ip }}"
+    routing: dynamic
+    region: "{{ region }}"
+  register: _cgw
+
+- name: Create the backup VPN (two IPsec tunnels with BGP)
+  amazon.aws.ec2_vpc_vpn:
+    customer_gateway_id: "{{ _cgw.gateway.customer_gateway.customer_gateway_id }}"
+    transit_gateway_id: "{{ tgw_id }}"
+    static_only: false
+    tunnel_options:
+      - TunnelInsideCidr: "{{ vpn_tunnel_cidrs[0] }}"
+      - TunnelInsideCidr: "{{ vpn_tunnel_cidrs[1] }}"
+    region: "{{ region }}"
+    tags: "{{ common_tags | combine(environment_tags.hub, {'Name': project ~ '-vpn-backup'}) }}"
+  register: _vpn
+
+- name: Create the Direct Connect gateway
+  community.aws.directconnect_gateway:
+    name: "{{ project }}-dxgw"
+    amazon_asn: "{{ dx_gateway_asn }}"
+    region: "{{ region }}"
+  register: _dxgw
+
+# No hay módulo para asociar un DX gateway a un Transit Gateway: se usa la CLI
+# y se consulta antes para que la tarea sea idempotente.
+- name: Check the Direct Connect gateway association
+  ansible.builtin.command:
+    argv: [aws, directconnect, describe-direct-connect-gateway-associations,
+           --direct-connect-gateway-id, "{{ _dxgw.result.direct_connect_gateway_id }}",
+           --associated-gateway-id, "{{ tgw_id }}", --region, "{{ region }}",
+           --query, "length(directConnectGatewayAssociations)", --output, text]
+  register: _dx_assoc
+  changed_when: false
+
+# Solo se anuncia el agregado de la nube: el campus nunca ve prefijos más específicos,
+# y eso es lo que mantiene predecible la preferencia entre Direct Connect y VPN.
+- name: Associate the Direct Connect gateway with the Transit Gateway
+  ansible.builtin.command:
+    argv: [aws, directconnect, create-direct-connect-gateway-association,
+           --direct-connect-gateway-id, "{{ _dxgw.result.direct_connect_gateway_id }}",
+           --gateway-id, "{{ tgw_id }}", --region, "{{ region }}",
+           --add-allowed-prefixes-to-direct-connect-gateway, "cidr={{ cloud_aggregate }}"]
+  when: _dx_assoc.stdout | int == 0
+  changed_when: true
+
+# Si la VPN empieza a pasar tráfico es porque cayó el enlace dedicado.
+- name: Alarm when the backup VPN carries traffic
+  amazon.aws.cloudwatch_metric_alarm:
+    name: "{{ project }}-vpn-backup-active"
+    namespace: AWS/VPN
+    metric_name: TunnelDataIn
+    statistic: Sum
+    comparison: GreaterThanThreshold
+    threshold: 0
+    period: 300
+    evaluation_periods: 1
+    dimensions: {VpnId: "{{ _vpn.vpn_connection_id }}"}
+    alarm_actions: ["{{ alarm_topic_arn }}"]
+    treat_missing_data: notBreaching
+    region: "{{ region }}"

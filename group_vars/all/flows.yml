@@ -1,0 +1,167 @@
+---
+# Matriz de flujos (Tabla 3 del entregable de seguridad) en formato legible por máquina.
+# Cada flujo lleva los campos de la tabla y, según dónde se aplica:
+#   sg: regla de entrada en un security group
+#   fw: regla del Network Firewall del Hub (se traduce a Suricata)
+# Un flujo sin sg ni fw se controla fuera de la red (WAF, Identity Center, PrivateLink)
+# o es estructural (sin ruta), y queda aquí solo como documentación.
+
+security_groups:
+  alb: {vpc: ext, description: Public ALB for portal and APIs}
+  app: {vpc: prod, description: Portal and API tasks}
+  db: {vpc: prod, description: Aurora PostgreSQL}
+  resolver: {vpc: shared, description: Route 53 Resolver endpoints}
+  endpoints: {vpc: shared, description: Interface VPC endpoints}
+
+cloudfront_prefix_list_id: pl-3b927c52     # lista administrada de CloudFront en us-east-1
+
+# Dominios permitidos para la salida a Internet (F-13).
+egress_allowed_domains: [.amazonaws.com, .ubuntu.com, .debian.org, .pypi.org, .npmjs.org]
+
+flows:
+  - id: F-01
+    src: Internet
+    dst: CloudFront y WAF
+    action: allow
+    control: WAF con reglas administradas (se despliega con la aplicación)
+
+  - id: F-02
+    src: CloudFront
+    dst: ALB en Externos
+    action: allow
+    sg: {group: alb, from_prefix_list: cloudfront, proto: tcp, ports: [443]}
+
+  - id: F-03
+    src: ALB en Externos
+    dst: Producción · aplicación
+    action: allow
+    sg: {group: app, from_cidrs: [10.37.0.0/26], proto: tcp, ports: [8443]}
+    fw: {proto: tcp, src: 10.37.0.0/26, dst: 10.34.0.0/23, ports: [8443]}
+
+  - id: F-04
+    src: Producción · aplicación
+    dst: Producción · datos
+    action: allow
+    sg: {group: db, from_group: app, proto: tcp, ports: [5432]}
+
+  - id: F-05
+    src: Producción · aplicación
+    dst: Campus · sistemas legados
+    action: allow
+    fw: {proto: tcp, src: 10.34.0.0/23, dst: 10.1.20.0/26, ports: [443]}
+
+  - id: F-06
+    src: Datos · AWS DMS
+    dst: Campus · bases de datos
+    action: allow
+    fw: {proto: tcp, src: 10.36.0.0/25, dst: 10.1.30.0/27, ports: [5432]}
+
+  - id: F-07
+    src: Todas las VPC
+    dst: Resolver de entrada
+    action: allow
+    sg: {group: resolver, from_cidrs: [10.32.0.0/12], proto: [udp, tcp], ports: [53]}
+
+  - id: F-08
+    src: Resolver de salida
+    dst: Campus · DNS interno
+    action: allow
+    fw: {proto: [udp, tcp], src: 10.33.0.0/25, dst: 10.1.10.0/28, ports: [53]}
+
+  - id: F-09
+    src: Campus · DNS interno
+    dst: Resolver de entrada
+    action: allow
+    sg: {group: resolver, from_cidrs: [10.1.10.0/28], proto: [udp, tcp], ports: [53]}
+    fw: {proto: [udp, tcp], src: 10.1.10.0/28, dst: 10.33.0.0/25, ports: [53]}
+
+  - id: F-10
+    src: Todas las VPC
+    dst: Endpoints de interfaz
+    action: allow
+    sg: {group: endpoints, from_cidrs: [10.32.0.0/12], proto: tcp, ports: [443]}
+
+  - id: F-11
+    src: Administradores
+    dst: Consola y API de AWS
+    action: allow
+    control: IAM Identity Center federado con MFA
+
+  - id: F-12
+    src: Administradores
+    dst: Instancias y contenedores
+    action: allow
+    control: Session Manager a través de los endpoints de F-10
+
+  - id: F-13
+    src: Producción, Desarrollo y Datos
+    dst: Internet (actualizaciones)
+    action: allow
+    fw: {domains: true}
+
+  - id: F-14
+    src: Campus · usuarios
+    dst: Portal y APIs en Producción
+    action: allow
+    sg: {group: app, from_cidrs: [10.2.0.0/16, 10.3.0.0/16], proto: tcp, ports: [443]}
+    fw: {proto: tcp, src: 10.2.0.0/15, dst: 10.34.0.0/23, ports: [443]}
+
+  - id: F-15
+    src: Terceros autorizados
+    dst: Externos · PrivateLink
+    action: allow
+    control: Endpoint service con lista de cuentas autorizadas
+
+  - id: F-16
+    src: Todas las VPC
+    dst: S3 de registros y CloudWatch
+    action: allow
+    control: Endpoints de gateway (S3) y de interfaz (F-10)
+
+  - id: D-01
+    src: Producción
+    dst: Desarrollo (y al revés)
+    action: deny
+    fw: {proto: ip, src: 10.34.0.0/16, dst: 10.35.0.0/16, both_ways: true}
+
+  - id: D-02
+    src: Externos (DMZ)
+    dst: Campus
+    action: deny
+    fw: {proto: ip, src: 10.37.0.0/16, dst: 10.0.0.0/12}
+
+  - id: D-03
+    src: Desarrollo
+    dst: Campus · data center
+    action: deny
+    fw: {proto: ip, src: 10.35.0.0/16, dst: 10.1.0.0/16}
+
+  - id: D-04
+    src: Internet
+    dst: Subredes privadas
+    action: deny
+    control: Sin ruta al IGW ni direcciones públicas (estructural)
+
+  - id: D-05
+    src: Cualquier origen
+    dst: Puertos de acceso remoto
+    action: deny
+    fw: {proto: tcp, src: any, dst: any, ports: [22, 3389]}
+
+  - id: D-06
+    src: Campus · usuarios
+    dst: Producción · datos
+    action: deny
+    fw: {proto: ip, src: 10.2.0.0/15, dst: 10.34.2.0/27}
+
+  - id: D-07
+    src: Wi-Fi de invitados
+    dst: Campus interno y nube
+    action: deny
+    fw: {proto: ip, src: 10.3.32.0/21, dst: 10.32.0.0/12}
+
+  - id: D-08
+    src: Cualquier origen no listado
+    dst: Cualquier destino
+    action: deny
+    control: Acción por defecto del firewall (aws:drop_established) y de los security groups

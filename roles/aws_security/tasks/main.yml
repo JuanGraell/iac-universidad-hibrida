@@ -1,0 +1,67 @@
+---
+# Security groups generados desde la matriz de flujos y registro de flujos de todas las VPC.
+
+# Cada flujo con campo sg se vuelve una regla de entrada en su grupo.
+# Las reglas llevan el ID del flujo como descripción: así se rastrea cada regla hasta la matriz.
+- name: Create the security groups from the flow matrix
+  amazon.aws.ec2_security_group:
+    name: "{{ project }}-{{ item.key }}"
+    description: "{{ item.value.description }}"
+    vpc_id: "{{ vpc_ids[item.value.vpc] }}"
+    region: "{{ region }}"
+    purge_rules: true
+    rules: >-
+      {%- set out = [] -%}
+      {%- for f in flows if f.sg is defined and f.sg.group == item.key -%}
+      {%- for proto in [f.sg.proto] | flatten -%}
+      {%- for port in f.sg.ports -%}
+      {%- set base = {'proto': proto, 'ports': [port], 'rule_desc': f.id ~ ' flows.yml'} -%}
+      {%- if f.sg.from_cidrs is defined -%}
+      {%- for cidr in f.sg.from_cidrs -%}
+      {%- set _ = out.append(base | combine({'cidr_ip': cidr})) -%}
+      {%- endfor -%}
+      {%- elif f.sg.from_group is defined -%}
+      {%- set _ = out.append(base | combine({'group_name': project ~ '-' ~ f.sg.from_group})) -%}
+      {%- elif f.sg.from_prefix_list is defined -%}
+      {%- set _ = out.append(base | combine({'ip_prefix': cloudfront_prefix_list_id})) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ out }}
+    tags: "{{ common_tags | combine(environment_tags[item.value.vpc]) }}"
+  loop: "{{ security_groups | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: _sg
+
+- name: Save the security group IDs
+  ansible.builtin.set_fact:
+    sg_ids: "{{ sg_ids | default({}) | combine({item.item.key: item.group_id}) }}"
+  loop: "{{ _sg.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+
+# El grupo por defecto queda sin reglas: nadie lo usa por descuido.
+- name: Empty the default security group of every VPC
+  amazon.aws.ec2_security_group:
+    name: default
+    description: default VPC security group
+    vpc_id: "{{ item.value }}"
+    region: "{{ region }}"
+    rules: []
+    rules_egress: []
+    purge_rules: true
+    purge_rules_egress: true
+  loop: "{{ vpc_ids | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+# No hay módulo para VPC Flow Logs: se despliegan como plantilla CloudFormation.
+- name: Enable VPC Flow Logs into the Log Archive bucket
+  amazon.aws.cloudformation:
+    stack_name: "{{ project }}-flow-logs"
+    state: present
+    region: "{{ region }}"
+    template_body: "{{ lookup('ansible.builtin.template', 'flow-logs.yml.j2') }}"
+    tags: "{{ common_tags | combine(environment_tags.hub) }}"

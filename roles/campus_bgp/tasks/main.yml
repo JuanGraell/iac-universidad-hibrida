@@ -1,0 +1,135 @@
+---
+# eBGP hacia AWS en los routers de borde: un solo agregado de salida, un solo agregado
+# de entrada y LOCAL_PREF para que el Direct Connect gane sobre la VPN.
+
+- name: Anchor the campus aggregate with a route to Null0
+  cisco.ios.ios_static_routes:
+    config:
+      - address_families:
+          - afi: ipv4
+            routes:
+              - dest: "{{ campus_aggregate }}"
+                next_hops:
+                  - {interface: Null0}
+    state: merged
+
+- name: Create the prefix lists (one aggregate in each direction)
+  cisco.ios.ios_prefix_lists:
+    config:
+      - afi: ipv4
+        prefix_lists:
+          - name: PL-CAMPUS-OUT
+            entries:
+              - {sequence: 10, action: permit, prefix: "{{ campus_aggregate }}"}
+          - name: PL-CLOUD-IN
+            entries:
+              - {sequence: 10, action: permit, prefix: "{{ cloud_aggregate }}"}
+    state: merged
+
+# Una ruta que no pase por la prefix-list queda rechazada por el deny implícito del route-map.
+- name: Create the route maps
+  cisco.ios.ios_route_maps:
+    config:
+      - route_map: RM-DX-IN
+        entries:
+          - sequence: 10
+            action: permit
+            match: {ip: {address: {prefix_lists: [PL-CLOUD-IN]}}}
+            set: {local_preference: {value: "{{ local_pref_dx }}"}}
+      - route_map: RM-VPN-IN
+        entries:
+          - sequence: 10
+            action: permit
+            match: {ip: {address: {prefix_lists: [PL-CLOUD-IN]}}}
+            set: {local_preference: {value: "{{ local_pref_vpn }}"}}
+      - route_map: RM-CAMPUS-OUT
+        entries:
+          - sequence: 10
+            action: permit
+            match: {ip: {address: {prefix_lists: [PL-CAMPUS-OUT]}}}
+      - route_map: RM-BGP-TO-OSPF
+        entries:
+          - sequence: 10
+            action: permit
+            match: {ip: {address: {prefix_lists: [PL-CLOUD-IN]}}}
+    state: merged
+
+- name: Configure the BGP process and its neighbors
+  cisco.ios.ios_bgp_global:
+    config:
+      as_number: "{{ campus_asn }}"
+      bgp:
+        router_id:
+          address: "{{ campus_devices[inventory_hostname].loopback | ansible.utils.ipaddr('address') }}"
+        log_neighbor_changes: true
+      neighbors: >-
+        {%- set out = [] -%}
+        {%- for p in campus_bgp_peers[inventory_hostname] -%}
+        {%- set n = {'neighbor_address': p.address, 'remote_as': p.remote_as, 'description': p.description} -%}
+        {%- if p.ibgp | default(false) -%}
+        {%- set n = n | combine({'update_source': 'Loopback0'}) -%}
+        {%- endif -%}
+        {%- if p.md5 | default(false) -%}
+        {%- set n = n | combine({'password_options': {'pass_key': vault_bgp_md5_key}}) -%}
+        {%- endif -%}
+        {%- if p.bfd | default(false) -%}
+        {%- set n = n | combine({'fall_over': {'bfd': {'set': true}}}) -%}
+        {%- endif -%}
+        {%- set _ = out.append(n) -%}
+        {%- endfor -%}
+        {{ out }}
+    state: merged
+
+- name: Configure the IPv4 address family (announce, filter, prefer)
+  cisco.ios.ios_bgp_address_family:
+    config:
+      as_number: "{{ campus_asn }}"
+      address_family:
+        - afi: ipv4
+          networks:
+            - address: "{{ campus_aggregate | ansible.utils.ipaddr('network') }}"
+              mask: "{{ campus_aggregate | ansible.utils.ipaddr('netmask') }}"
+          neighbors: >-
+            {%- set out = [] -%}
+            {%- for p in campus_bgp_peers[inventory_hostname] -%}
+            {%- if p.ibgp | default(false) -%}
+            {%- set _ = out.append({'neighbor_address': p.address, 'activate': true,
+                                    'nexthop_self': {'set': true}}) -%}
+            {%- else -%}
+            {%- set _ = out.append({'neighbor_address': p.address, 'activate': true,
+                                    'route_maps': [{'name': p.route_map_in, 'in': true},
+                                                   {'name': 'RM-CAMPUS-OUT', 'out': true}]}) -%}
+            {%- endif -%}
+            {%- endfor -%}
+            {{ out }}
+    state: merged
+
+# El FW y el core aprenden el agregado de la nube por OSPF. El módulo ios_ospfv2
+# no maneja redistribución, así que esta línea va con ios_config.
+- name: Redistribute the cloud aggregate into OSPF
+  cisco.ios.ios_config:
+    parents: router ospf 1
+    lines: ["redistribute bgp {{ campus_asn }} route-map RM-BGP-TO-OSPF"]
+
+# R-EDGE-02 tiene la salida a Internet del campus y la anuncia como ruta por defecto.
+- name: Default route to the ISP and default-information originate
+  when: inventory_hostname == 'r-edge-02'
+  block:
+    - name: Add the default route towards the ISP
+      cisco.ios.ios_static_routes:
+        config:
+          - address_families:
+              - afi: ipv4
+                routes:
+                  - dest: 0.0.0.0/0
+                    next_hops:
+                      - {forward_router_address: "{{ isp_next_hop }}"}
+        state: merged
+
+    - name: Originate the default route into OSPF
+      cisco.ios.ios_ospfv2:
+        config:
+          processes:
+            - process_id: 1
+              default_information: {originate: true}
+        state: merged

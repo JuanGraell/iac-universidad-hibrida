@@ -1,0 +1,93 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Network Firewall del Hub. Las reglas se generan desde group_vars/all/flows.yml:
+  primero las denegaciones, luego los flujos permitidos. Todo lo demás se descarta.
+
+Resources:
+  FlowRules:
+    Type: AWS::NetworkFirewall::RuleGroup
+    Properties:
+      RuleGroupName: {{ project }}-flow-matrix
+      Type: STATEFUL
+      Capacity: 200
+      RuleGroup:
+        StatefulRuleOptions:
+          RuleOrder: STRICT_ORDER
+        RuleVariables:
+          IPSets:
+            HOME_NET:
+              Definition: ["{{ organization_supernet }}"]
+        RulesSource:
+          RulesString: |
+{% set ns = namespace(sid=1000) %}
+{% for f in flows if f.action == 'deny' and f.fw is defined %}
+{% for proto in [f.fw.proto] | flatten %}
+{% set ns.sid = ns.sid + 1 %}
+{% set ports = f.fw.ports | default([]) %}
+{% set port = 'any' if ports | length == 0 else (ports[0] if ports | length == 1 else '[' ~ ports | join(',') ~ ']') %}
+            drop {{ proto }} {{ f.fw.src }} any {{ '<>' if f.fw.both_ways | default(false) else '->' }} {{ f.fw.dst }} {{ port }} (msg:"{{ f.id }}"; sid:{{ ns.sid }}; rev:1;)
+{% endfor %}
+{% endfor %}
+{% for f in flows if f.action == 'allow' and f.fw is defined and f.fw.domains is not defined %}
+{% for proto in [f.fw.proto] | flatten %}
+{% for port in f.fw.ports %}
+{% set ns.sid = ns.sid + 1 %}
+            pass {{ proto }} {{ f.fw.src }} any -> {{ f.fw.dst }} {{ port }} (msg:"{{ f.id }}"; flow:to_server; sid:{{ ns.sid }}; rev:1;)
+{% endfor %}
+{% endfor %}
+{% endfor %}
+{% set ns.sid = ns.sid + 1 %}
+            pass tcp $HOME_NET any -> $EXTERNAL_NET 443 (msg:"F-13 handshake"; flow:not_established; sid:{{ ns.sid }}; rev:1;)
+{% for d in egress_allowed_domains %}
+{% set ns.sid = ns.sid + 1 %}
+            pass tls $HOME_NET any -> $EXTERNAL_NET 443 (msg:"F-13 {{ d }}"; tls.sni; dotprefix; content:"{{ d }}"; nocase; endswith; flow:to_server; sid:{{ ns.sid }}; rev:1;)
+{% endfor %}
+
+  Policy:
+    Type: AWS::NetworkFirewall::FirewallPolicy
+    Properties:
+      FirewallPolicyName: {{ project }}-hub-policy
+      FirewallPolicy:
+        StatelessDefaultActions: ["aws:forward_to_sfe"]
+        StatelessFragmentDefaultActions: ["aws:forward_to_sfe"]
+        StatefulEngineOptions:
+          RuleOrder: STRICT_ORDER
+        # D-08: lo que no está en la matriz se descarta y queda registrado.
+        StatefulDefaultActions: ["aws:drop_established", "aws:alert_established"]
+        StatefulRuleGroupReferences:
+          - ResourceArn:
+              Ref: FlowRules
+            Priority: 10
+
+  Firewall:
+    Type: AWS::NetworkFirewall::Firewall
+    Properties:
+      FirewallName: {{ project }}-hub-firewall
+      VpcId: {{ vpc_ids.hub }}
+      FirewallPolicyArn:
+        Ref: Policy
+      SubnetMappings:
+{% for az in azs %}
+        - SubnetId: {{ subnet_ids.hub.firewall[az] }}
+{% endfor %}
+
+  Logging:
+    Type: AWS::NetworkFirewall::LoggingConfiguration
+    Properties:
+      FirewallArn:
+        Ref: Firewall
+      LoggingConfiguration:
+        LogDestinationConfigs:
+{% for log_type in ['ALERT', 'FLOW'] %}
+          - LogType: {{ log_type }}
+            LogDestinationType: S3
+            LogDestination:
+              bucketName: {{ log_archive_bucket }}
+              prefix: network-firewall/{{ log_type | lower }}
+{% endfor %}
+
+Outputs:
+  EndpointIds:
+    Description: Endpoints por zona, con formato az:vpce-id
+    Value:
+      Fn::Join: [",", {"Fn::GetAtt": [Firewall, EndpointIds]}]

@@ -1,0 +1,66 @@
+---
+# Auditoría: compara lo desplegado con los datos YAML y falla si no coinciden.
+# Ansible no guarda estado como Terraform; este playbook es lo que detecta la deriva
+# (alguien que cambió algo a mano en la consola). Se ejecuta a diario desde el pipeline.
+
+- name: Audit the cloud network against addressing.yml
+  hosts: aws
+  gather_facts: false
+  tags: [aws]
+  tasks:
+    - name: Read the VPCs
+      amazon.aws.ec2_vpc_net_info:
+        region: "{{ region }}"
+        filters: {"tag:Name": "{{ project }}-{{ item.key }}"}
+      loop: "{{ vpcs | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: _vpcs
+
+    - name: Each VPC exists once with the expected CIDR
+      ansible.builtin.assert:
+        that:
+          - item.vpcs | length == 1
+          - item.vpcs[0].cidr_block == item.item.value.cidr
+        fail_msg: "VPC {{ item.item.key }} does not match addressing.yml"
+        quiet: true
+      loop: "{{ _vpcs.results }}"
+      loop_control:
+        label: "{{ item.item.key }}"
+
+    - name: Read the subnets of each VPC
+      amazon.aws.ec2_vpc_subnet_info:
+        region: "{{ region }}"
+        filters: {vpc-id: "{{ item.vpcs[0].id }}"}
+      loop: "{{ _vpcs.results }}"
+      loop_control:
+        label: "{{ item.item.key }}"
+      register: _subnets
+
+    - name: Subnets match the table exactly (none missing, none extra)
+      ansible.builtin.assert:
+        that: >-
+          (item.subnets | map(attribute='cidr_block') | sort)
+          == (item.item.item.value.tiers.values() | map(attribute='cidrs') | flatten | sort)
+        fail_msg: "Subnets of {{ item.item.item.key }} drifted from addressing.yml"
+        quiet: true
+      loop: "{{ _subnets.results }}"
+      loop_control:
+        label: "{{ item.item.item.key }}"
+
+- name: Audit the campus routing policy
+  hosts: r-edge-01
+  gather_facts: false
+  tags: [campus]
+  tasks:
+    - name: Read the route to the cloud aggregate
+      cisco.ios.ios_command:
+        commands: ["show ip bgp {{ cloud_aggregate }}"]
+      register: _bgp
+
+    - name: The best path to the cloud goes through Direct Connect
+      ansible.builtin.assert:
+        that:
+          - "'169.254.100.2' in _bgp.stdout[0]"
+          - "'localpref ' ~ local_pref_dx in _bgp.stdout[0]"
+        fail_msg: The cloud is not reached through Direct Connect; check the DX session

@@ -1,0 +1,65 @@
+---
+# Tablas de rutas de las VPC (Tabla 3, sección 4): una por tier y por zona,
+# para que cada zona use su propio NAT y su propio endpoint de firewall.
+
+- name: Build the list of route tables
+  ansible.builtin.set_fact:
+    _route_tables: >-
+      {%- set out = [] -%}
+      {%- for vpc, tiers in vpc_route_tables.items() -%}
+      {%- for tier, routes in tiers.items() -%}
+      {%- for az in azs -%}
+      {%- set _ = out.append({'vpc': vpc, 'tier': tier, 'az': az, 'routes': routes}) -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ out }}
+
+# Traduce el destino simbólico de routing.yml al ID real del recurso.
+- name: Create the route tables and associate each subnet
+  amazon.aws.ec2_vpc_route_table:
+    vpc_id: "{{ vpc_ids[item.vpc] }}"
+    region: "{{ region }}"
+    subnets: ["{{ subnet_ids[item.vpc][item.tier][item.az] }}"]
+    purge_routes: true
+    routes: >-
+      {%- set out = [] -%}
+      {%- for r in item.routes -%}
+      {%- if r.target == 'tgw' -%}
+      {%- set _ = out.append({'dest': r.dest, 'transit_gateway_id': tgw_id}) -%}
+      {%- elif r.target == 'igw' -%}
+      {%- set _ = out.append({'dest': r.dest, 'gateway_id': 'igw'}) -%}
+      {%- elif r.target == 'nat' -%}
+      {%- set _ = out.append({'dest': r.dest, 'gateway_id': nat_ids[item.az]}) -%}
+      {%- elif r.target == 'firewall' -%}
+      {%- set _ = out.append({'dest': r.dest, 'vpc_endpoint_id': fw_endpoints[item.az]}) -%}
+      {%- elif r.target == 'eigw' -%}
+      {%- set _ = out.append({'dest': r.dest, 'egress_only_internet_gateway_id': eigw_ids[item.vpc]}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+    tags: "{{ common_tags | combine(environment_tags[item.vpc], {'Name': project ~ '-rtb-' ~ item.vpc ~ '-' ~ item.tier ~ '-' ~ item.az[-1]}) }}"
+  loop: "{{ _route_tables }}"
+  loop_control:
+    label: "{{ item.vpc }} {{ item.tier }} {{ item.az }}"
+  register: _rtb
+
+- name: Save the route table IDs by VPC and tier
+  ansible.builtin.set_fact:
+    rtb_ids: "{{ rtb_ids | default({}) | combine({item.item.vpc: {item.item.tier: [item.route_table.id]}}, recursive=true, list_merge='append') }}"
+  loop: "{{ _rtb.results }}"
+  loop_control:
+    label: "{{ item.item.vpc }} {{ item.item.tier }}"
+
+# Acceso privado a S3 sin pasar por Internet ni por el NAT.
+- name: Create the S3 gateway endpoints
+  amazon.aws.ec2_vpc_endpoint:
+    vpc_id: "{{ vpc_ids[item.key] }}"
+    service: "com.amazonaws.{{ region }}.s3"
+    vpc_endpoint_type: Gateway
+    route_table_ids: "{{ item.value | map('extract', rtb_ids[item.key]) | flatten }}"
+    region: "{{ region }}"
+    tags: "{{ common_tags | combine(environment_tags[item.key], {'Name': project ~ '-' ~ item.key ~ '-s3'}) }}"
+  loop: "{{ s3_endpoint_tiers | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"

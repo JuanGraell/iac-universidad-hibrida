@@ -1,0 +1,81 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  DNS híbrido: la nube resuelve {{ campus_domain }} en el DNS del campus
+  y el campus resuelve {{ cloud_domain }} a través del Resolver de entrada.
+
+Resources:
+  InboundEndpoint:
+    Type: AWS::Route53Resolver::ResolverEndpoint
+    Properties:
+      Name: {{ project }}-resolver-inbound
+      Direction: INBOUND
+      SecurityGroupIds: [{{ sg_ids.resolver }}]
+      IpAddresses:
+{% for az in azs %}
+        - {SubnetId: {{ subnet_ids.shared.services[az] }}, Ip: {{ resolver_inbound_ips[loop.index0] }}}
+{% endfor %}
+
+  OutboundEndpoint:
+    Type: AWS::Route53Resolver::ResolverEndpoint
+    Properties:
+      Name: {{ project }}-resolver-outbound
+      Direction: OUTBOUND
+      SecurityGroupIds: [{{ sg_ids.resolver }}]
+      IpAddresses:
+{% for az in azs %}
+        - {SubnetId: {{ subnet_ids.shared.services[az] }}, Ip: {{ resolver_outbound_ips[loop.index0] }}}
+{% endfor %}
+
+  # Reenvío condicional hacia el DNS del campus (flujo F-08).
+  ForwardToCampus:
+    Type: AWS::Route53Resolver::ResolverRule
+    Properties:
+      Name: {{ project }}-forward-campus
+      RuleType: FORWARD
+      DomainName: {{ campus_domain }}
+      ResolverEndpointId:
+        Ref: OutboundEndpoint
+      TargetIps:
+{% for ip in campus_dns_servers %}
+        - {Ip: {{ ip }}, Port: "53"}
+{% endfor %}
+
+{% for vpc, vpc_id in vpc_ids.items() %}
+  ForwardAssoc{{ vpc | title }}:
+    Type: AWS::Route53Resolver::ResolverRuleAssociation
+    Properties:
+      ResolverRuleId:
+        Fn::GetAtt: [ForwardToCampus, ResolverRuleId]
+      VPCId: {{ vpc_id }}
+
+{% endfor %}
+  # Zona privada de la nube, asociada a todas las VPC.
+  CloudZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: {{ cloud_domain }}
+      VPCs:
+{% for vpc, vpc_id in vpc_ids.items() %}
+        - {VPCId: {{ vpc_id }}, VPCRegion: {{ region }}}
+{% endfor %}
+
+  # Evidencia de qué nombres se resolvieron y desde dónde.
+  QueryLogs:
+    Type: AWS::Route53Resolver::ResolverQueryLoggingConfig
+    Properties:
+      Name: {{ project }}-resolver-query-logs
+      DestinationArn: arn:aws:s3:::{{ log_archive_bucket }}/resolver-query-logs/
+
+{% for vpc, vpc_id in vpc_ids.items() %}
+  QueryLogsAssoc{{ vpc | title }}:
+    Type: AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation
+    Properties:
+      ResolverQueryLogConfigId:
+        Fn::GetAtt: [QueryLogs, Id]
+      ResourceId: {{ vpc_id }}
+
+{% endfor %}
+Outputs:
+  InboundIps:
+    Description: Direcciones a las que el DNS del campus reenvía {{ cloud_domain }}
+    Value: "{{ resolver_inbound_ips | join(',') }}"

@@ -1,0 +1,11 @@
+---
+# DNS híbrido. Ansible no tiene módulos para Route 53 Resolver,
+# así que se despliega como plantilla CloudFormation (YAML).
+
+- name: Deploy the hybrid DNS (Resolver endpoints, forwarding rule and private zone)
+  amazon.aws.cloudformation:
+    stack_name: "{{ project }}-hybrid-dns"
+    state: present
+    region: "{{ region }}"
+    template_body: "{{ lookup('ansible.builtin.template', 'dns.yml.j2') }}"
+    tags: "{{ common_tags | combine(environment_tags.shared) }}"

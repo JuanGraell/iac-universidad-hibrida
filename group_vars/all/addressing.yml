@@ -1,0 +1,120 @@
+---
+# Fuente única del direccionamiento: reproduce la Tabla 2 (Subredes).
+# Si una dirección cambia, se cambia aquí y los roles de AWS y del campus la toman.
+
+region: us-east-1
+azs: [us-east-1a, us-east-1b]   # el índice de cada lista de cidrs corresponde a esta lista
+
+organization_supernet: 10.0.0.0/8
+campus_aggregate: 10.0.0.0/12
+cloud_aggregate: 10.32.0.0/12
+campus_aggregate_v6: "2001:db8::/40"
+cloud_aggregate_v6: "2001:db8:100::/40"
+
+# ------------------------------------------------------------------ nube
+# tiers: una subred por zona de disponibilidad. public: true la asocia a un IGW.
+vpcs:
+  hub:
+    cidr: 10.32.0.0/16
+    internet_gateway: true
+    nat_tier: public
+    appliance_mode: true          # ida y vuelta por el mismo endpoint del firewall
+    tiers:
+      public: {public: true, cidrs: [10.32.0.0/27, 10.32.0.32/27]}
+      firewall: {cidrs: [10.32.1.0/28, 10.32.1.16/28]}
+      tgw: {cidrs: [10.32.2.0/28, 10.32.2.16/28]}
+
+  shared:
+    cidr: 10.33.0.0/16
+    tiers:
+      services: {cidrs: [10.33.0.0/26, 10.33.0.64/26]}
+      tgw: {cidrs: [10.33.2.0/28, 10.33.2.16/28]}
+
+  prod:
+    cidr: 10.34.0.0/16
+    egress_only_igw: true         # salida IPv6 iniciada desde la VPC
+    tiers:
+      app: {cidrs: [10.34.0.0/24, 10.34.1.0/24]}
+      data: {cidrs: [10.34.2.0/28, 10.34.2.16/28]}
+      tgw: {cidrs: [10.34.3.0/28, 10.34.3.16/28]}
+
+  dev:
+    cidr: 10.35.0.0/16
+    tiers:
+      workloads: {cidrs: [10.35.0.0/26, 10.35.0.64/26]}
+      tgw: {cidrs: [10.35.3.0/28, 10.35.3.16/28]}
+
+  data:
+    cidr: 10.36.0.0/16
+    tiers:
+      analytics: {cidrs: [10.36.0.0/26, 10.36.0.64/26]}
+      tgw: {cidrs: [10.36.3.0/28, 10.36.3.16/28]}
+
+  ext:
+    cidr: 10.37.0.0/16
+    internet_gateway: true
+    tiers:
+      ingress: {public: true, cidrs: [10.37.0.0/27, 10.37.0.32/27]}
+      partners: {cidrs: [10.37.1.0/28, 10.37.1.16/28]}
+      tgw: {cidrs: [10.37.3.0/28, 10.37.3.16/28]}
+
+# Direcciones fijas de servicios que otros componentes referencian.
+campus_dns_servers: [10.1.10.10, 10.1.10.11]
+resolver_inbound_ips: [10.33.0.10, 10.33.0.74]
+resolver_outbound_ips: [10.33.0.20, 10.33.0.84]
+
+# ------------------------------------------------------------------ campus
+# gateway: equipo que tiene la SVI de la VLAN. La puerta de enlace es la primera dirección.
+campus_vlans:
+  - {id: 900, name: MGMT-NET, cidr: 10.0.10.0/25, gateway: sw-core}
+  - {id: 910, name: MGMT-AP, cidr: 10.0.11.0/24, gateway: sw-core}
+  - {id: 110, name: DC-DIRECTORY, cidr: 10.1.10.0/28, gateway: leaf-dc}
+  - {id: 120, name: DC-LEGACY, cidr: 10.1.20.0/26, gateway: leaf-dc}
+  - {id: 130, name: DC-DATABASES, cidr: 10.1.30.0/27, gateway: leaf-dc}
+  - {id: 140, name: DC-BACKUP, cidr: 10.1.40.0/28, gateway: leaf-dc}
+  - {id: 200, name: ADMIN, cidr: 10.2.0.0/23, gateway: sw-core}
+  - {id: 210, name: FACULTY, cidr: 10.2.2.0/23, gateway: sw-core}
+  - {id: 220, name: LABS, cidr: 10.2.4.0/23, gateway: sw-core}
+  - {id: 230, name: VOICE-A, cidr: 10.2.8.0/23, gateway: sw-core}
+  - {id: 231, name: VOICE-B, cidr: 10.2.10.0/23, gateway: sw-core}
+  - {id: 240, name: CCTV-ACCESS, cidr: 10.2.12.0/25, gateway: sw-core}
+  - {id: 250, name: PRINTERS, cidr: 10.2.12.128/25, gateway: sw-core}
+  - {id: 300, name: WIFI-INST-00, cidr: 10.3.0.0/23, gateway: sw-core}
+  - {id: 301, name: WIFI-INST-01, cidr: 10.3.2.0/23, gateway: sw-core}
+  - {id: 302, name: WIFI-INST-02, cidr: 10.3.4.0/23, gateway: sw-core}
+  - {id: 303, name: WIFI-INST-03, cidr: 10.3.6.0/23, gateway: sw-core}
+  - {id: 304, name: WIFI-INST-04, cidr: 10.3.8.0/23, gateway: sw-core}
+  - {id: 305, name: WIFI-INST-05, cidr: 10.3.10.0/23, gateway: sw-core}
+  - {id: 306, name: WIFI-INST-06, cidr: 10.3.12.0/23, gateway: sw-core}
+  - {id: 307, name: WIFI-INST-07, cidr: 10.3.14.0/23, gateway: sw-core}
+  - {id: 308, name: WIFI-INST-08, cidr: 10.3.16.0/23, gateway: sw-core}
+  - {id: 309, name: WIFI-INST-09, cidr: 10.3.18.0/23, gateway: sw-core}
+  - {id: 310, name: WIFI-GUEST-0, cidr: 10.3.32.0/23, gateway: sw-core}
+  - {id: 311, name: WIFI-GUEST-1, cidr: 10.3.34.0/23, gateway: sw-core}
+  - {id: 312, name: WIFI-GUEST-2, cidr: 10.3.36.0/23, gateway: sw-core}
+
+# Loopbacks y enlaces /31 de cada equipo gestionado (Tabla 2, infraestructura de red).
+campus_devices:
+  r-edge-01:
+    loopback: 10.0.0.1/32
+    links:
+      - {interface: GigabitEthernet0/0/1, address: 10.0.1.1/31, description: to FW-DC}
+      - {interface: GigabitEthernet0/0/2, address: 10.0.1.6/31, description: to R-EDGE-02 (iBGP)}
+      - {interface: GigabitEthernet0/0/0.101, address: 169.254.100.1/30, dot1q: 101, description: Direct Connect VIF}
+  r-edge-02:
+    loopback: 10.0.0.2/32
+    links:
+      - {interface: GigabitEthernet0/0/1, address: 10.0.1.3/31, description: to FW-DC}
+      - {interface: GigabitEthernet0/0/2, address: 10.0.1.7/31, description: to R-EDGE-01 (iBGP)}
+      - {interface: Tunnel1, address: 169.254.10.2/30, description: AWS VPN tunnel 1}
+      - {interface: Tunnel2, address: 169.254.10.6/30, description: AWS VPN tunnel 2}
+  sw-core:
+    loopback: 10.0.0.11/32
+    links:
+      - {interface: TenGigabitEthernet1/0/1, address: 10.0.1.5/31, description: to FW-DC}
+      - {interface: TenGigabitEthernet1/0/2, address: 10.0.1.8/31, description: to LEAF-DC}
+      - {interface: TenGigabitEthernet1/0/3, address: 10.0.1.10/31, description: to SW-ACC}
+  leaf-dc:
+    loopback: 10.0.0.31/32
+    links:
+      - {interface: Ethernet1/49, address: 10.0.1.9/31, description: to SW-CORE}

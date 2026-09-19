@@ -1,0 +1,22 @@
+---
+project: uhibrida
+
+# Etiquetas obligatorias en todo recurso de AWS: sin ellas no se reparte el costo.
+common_tags:
+  Owner: direccion-tic
+  ManagedBy: ansible
+
+environment_tags:
+  hub: {Environment: network, CostCenter: TIC-RED, DataClass: internal}
+  shared: {Environment: shared, CostCenter: TIC-RED, DataClass: internal}
+  prod: {Environment: prod, CostCenter: TIC-PROD, DataClass: confidential}
+  dev: {Environment: dev, CostCenter: TIC-DEV, DataClass: internal}
+  data: {Environment: data, CostCenter: TIC-DATA, DataClass: confidential}
+  ext: {Environment: ext, CostCenter: TIC-PROD, DataClass: public}
+
+# Destino de los registros en la cuenta Log Archive.
+log_archive_bucket: uhibrida-log-archive
+alarm_topic_arn: arn:aws:sns:us-east-1:111111111111:uhibrida-network-alarms
+
+campus_domain: ad.uhibrida.edu.co
+cloud_domain: aws.uhibrida.edu.co

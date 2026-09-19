@@ -1,0 +1,19 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: VPC Flow Logs de todas las VPC hacia la cuenta Log Archive.
+
+Resources:
+{% for vpc, vpc_id in vpc_ids.items() %}
+  FlowLog{{ vpc | title }}:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      ResourceId: {{ vpc_id }}
+      ResourceType: VPC
+      TrafficType: ALL
+      LogDestinationType: s3
+      LogDestination: arn:aws:s3:::{{ log_archive_bucket }}/vpc-flow-logs/{{ vpc }}/
+      Tags:
+{% for k, v in (common_tags | combine(environment_tags[vpc])).items() %}
+        - {Key: {{ k }}, Value: {{ v }}}
+{% endfor %}
+
+{% endfor %}

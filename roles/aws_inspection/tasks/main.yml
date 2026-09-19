@@ -1,0 +1,18 @@
+---
+# Network Firewall del Hub. No hay módulo de Ansible para este servicio,
+# así que se despliega como plantilla CloudFormation (YAML) generada desde la matriz de flujos.
+
+- name: Deploy the Hub firewall and its rules from the flow matrix
+  amazon.aws.cloudformation:
+    stack_name: "{{ project }}-hub-firewall"
+    state: present
+    region: "{{ region }}"
+    template_body: "{{ lookup('ansible.builtin.template', 'firewall.yml.j2') }}"
+    tags: "{{ common_tags | combine(environment_tags.hub) }}"
+  register: _fw_stack
+
+# EndpointIds llega como "us-east-1a:vpce-...,us-east-1b:vpce-...".
+- name: Save the firewall endpoint of each zone
+  ansible.builtin.set_fact:
+    fw_endpoints: "{{ fw_endpoints | default({}) | combine({item.split(':')[0]: item.split(':')[1]}) }}"
+  loop: "{{ _fw_stack.stack_outputs.EndpointIds.split(',') }}"

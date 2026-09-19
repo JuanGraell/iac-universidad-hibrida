@@ -1,0 +1,105 @@
+---
+# Enrutamiento: reproduce la Tabla 3 (Rutas).
+
+tgw_asn: 64512
+dx_gateway_asn: 64513
+campus_asn: 65010
+
+campus_public_ip: 203.0.113.10          # IP pública de R-EDGE-02 (rango de documentación, RFC 5737)
+vpn_tunnel_cidrs: [169.254.10.0/30, 169.254.10.4/30]
+dx_peer_ip: 169.254.100.2               # lado AWS de la VIF de tránsito
+vpn_peer_ips: [169.254.10.1, 169.254.10.5]
+
+isp_next_hop: 203.0.113.9               # salida a Internet de R-EDGE-02
+
+# ------------------------------------------------------------------ BGP del campus
+# route_map_in fija la preferencia: el Direct Connect gana (200) y la VPN (100)
+# solo se usa si cae la sesión principal.
+campus_bgp_peers:
+  r-edge-01:
+    - {address: 169.254.100.2, remote_as: 64513, description: AWS Direct Connect gateway,
+       route_map_in: RM-DX-IN, bfd: true, md5: true}
+    - {address: 10.0.0.2, remote_as: 65010, description: R-EDGE-02 iBGP, ibgp: true}
+  r-edge-02:
+    - {address: 169.254.10.1, remote_as: 64512, description: AWS VPN tunnel 1, route_map_in: RM-VPN-IN}
+    - {address: 169.254.10.5, remote_as: 64512, description: AWS VPN tunnel 2, route_map_in: RM-VPN-IN}
+    - {address: 10.0.0.1, remote_as: 65010, description: R-EDGE-01 iBGP, ibgp: true}
+
+local_pref_dx: 200
+local_pref_vpn: 100
+
+# ------------------------------------------------------------------ Transit Gateway
+# associations / propagations usan los nombres de las VPC y los especiales dxgw y vpn.
+tgw_route_tables:
+  rt-prod:
+    associations: [prod]
+    propagations: [shared]
+    static: {"0.0.0.0/0": hub}
+    blackholes: [10.35.0.0/16]
+  rt-dev:
+    associations: [dev]
+    propagations: [shared]
+    static: {"0.0.0.0/0": hub}
+    blackholes: [10.34.0.0/16]
+  rt-data:
+    associations: [data]
+    propagations: [shared]
+    static: {"0.0.0.0/0": hub}
+    blackholes: []
+  rt-ext:
+    associations: [ext]
+    propagations: [shared]
+    static: {"0.0.0.0/0": hub}
+    blackholes: []
+  rt-shared:
+    associations: [shared]
+    propagations: [prod, dev, data, ext]
+    static: {"0.0.0.0/0": hub}
+    blackholes: []
+  rt-onprem:
+    associations: [dxgw, vpn]
+    propagations: []
+    static: {"10.32.0.0/12": hub}
+    blackholes: []
+  rt-inspection:
+    associations: [hub]
+    propagations: [prod, dev, data, ext, shared, dxgw, vpn]
+    static: {}
+    blackholes: []
+
+# ------------------------------------------------------------------ VPC
+# Una tabla por tier y por zona. target: tgw, igw, nat (misma AZ), firewall (misma AZ), eigw.
+# La ruta local la crea AWS. Los tiers sin entrada solo tienen la ruta local.
+vpc_route_tables:
+  hub:
+    public:
+      - {dest: 0.0.0.0/0, target: igw}
+      - {dest: 10.0.0.0/8, target: firewall}
+    firewall:
+      - {dest: 0.0.0.0/0, target: nat}
+      - {dest: 10.0.0.0/8, target: tgw}
+    tgw:
+      - {dest: 0.0.0.0/0, target: firewall}
+  shared:
+    services: [{dest: 0.0.0.0/0, target: tgw}]
+  prod:
+    app:
+      - {dest: 0.0.0.0/0, target: tgw}
+      - {dest: "::/0", target: eigw}
+    data: [{dest: 10.0.0.0/8, target: tgw}]    # sin ruta por defecto: la base no sale a Internet
+  dev:
+    workloads: [{dest: 0.0.0.0/0, target: tgw}]
+  data:
+    analytics: [{dest: 0.0.0.0/0, target: tgw}]
+  ext:
+    ingress:
+      - {dest: 0.0.0.0/0, target: igw}
+      - {dest: 10.34.0.0/16, target: tgw}
+    partners: [{dest: 0.0.0.0/0, target: tgw}]
+
+# Tiers que reciben el endpoint de gateway de S3 (acceso privado, sin NAT).
+s3_endpoint_tiers:
+  shared: [services]
+  prod: [app, data]
+  dev: [workloads]
+  data: [analytics]
